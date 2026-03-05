@@ -1,64 +1,74 @@
-# sanity.rc — Configuration for tw-sanity-check
+# sanity.rc — Configuration for sanity-check
 # Copy to ~/.task/config/sanity.rc and edit to taste.
 #
 # Include in .taskrc with:
 #   include ~/.task/config/sanity.rc
 #
+# Global settings:
+#   sanity.clear-term = task | condition | no
+#
 # Each condition has:
-#   description   short label shown in status output
+#   description   short label shown in status/menu
 #   filter        Taskwarrior filter expression
 #   msg           heading shown during interactive review
-#   sort          field to sort by (field+ ascending, field- descending)
-#   action        fix template pre-filled in the prompt
-#                 supports <field> and <field±Nd/w/m/y> tokens, e.g. <due-1d>
-#   type          special handler: 'orphans' or 'diag' (omit for normal filter)
+#   sort          field± to sort by (e.g. due+, urgency-)
+#   action        comma-separated fix options: "label|template, label|template"
+#                 tokens: <field>  <field±Nd/w/m/y>  e.g. <due+1w>
+#   helpers       optional: calendar  (adds c=calendar hotkey)
+#   type          special handler: orphans | diag  (omit for normal filter)
 
-condition.late-due.description  = Tasks with past due dates
-condition.late-due.filter       = +PENDING due.before:today
-condition.late-due.msg          = These tasks are overdue
-condition.late-due.sort         = due+
-condition.late-due.action       = mod due:
+sanity.clear-term = no
+
+condition.late-due.description = Tasks with past due dates
+condition.late-due.filter      = +PENDING due.before:today
+condition.late-due.msg         = These tasks are overdue
+condition.late-due.sort        = due+
+condition.late-due.action      = reschedule +1w|mod due:<today+1w>, reschedule +1m|mod due:<today+1m>, remove due|mod due:
+condition.late-due.helpers     = calendar
 
 condition.late-sched.description = Tasks with past scheduled dates
 condition.late-sched.filter      = +PENDING scheduled.before:today
 condition.late-sched.msg         = Past scheduled date — reschedule or clear
 condition.late-sched.sort        = scheduled+
-condition.late-sched.action      = mod scheduled:
+condition.late-sched.action      = reschedule +1w|mod scheduled:<today+1w>, reschedule +1m|mod scheduled:<today+1m>, remove scheduled|mod scheduled:
+condition.late-sched.helpers     = calendar
 
 condition.wait-after-due.description = Wait date is after due date
 condition.wait-after-due.filter      = +PENDING wait.after:due
 condition.wait-after-due.msg         = Task will appear in the list after it's already due
 condition.wait-after-due.sort        = due+
-condition.wait-after-due.action      = mod wait:<due-1d>
+condition.wait-after-due.action      = wait day before due|mod wait:<due-1d>, remove wait|mod wait:
+condition.wait-after-due.helpers     = calendar
 
 condition.until-before-due.description = Task expires before its due date
 condition.until-before-due.filter      = +PENDING until.before:due
 condition.until-before-due.msg         = Until is before due — task will vanish too soon
 condition.until-before-due.sort        = due+
-condition.until-before-due.action      = mod until:<due+1w>
+condition.until-before-due.action      = until week after due|mod until:<due+1w>, remove until|mod until:
+condition.until-before-due.helpers     = calendar
 
 condition.wait-after-scheduled.description = Wait date is after scheduled date
 condition.wait-after-scheduled.filter      = +PENDING wait.after:scheduled
 condition.wait-after-scheduled.msg         = Task will appear after its scheduled time
 condition.wait-after-scheduled.sort        = scheduled+
-condition.wait-after-scheduled.action      = mod wait:<scheduled-1d>
+condition.wait-after-scheduled.action      = wait day before scheduled|mod wait:<scheduled-1d>, remove wait|mod wait:
+condition.wait-after-scheduled.helpers     = calendar
 
 condition.scheduled-after-due.description = Scheduled date is after due date
 condition.scheduled-after-due.filter      = +PENDING scheduled.after:due
 condition.scheduled-after-due.msg         = Scheduled too late — won't appear in time
 condition.scheduled-after-due.sort        = due+
-condition.scheduled-after-due.action      = mod scheduled:<due-1d>
+condition.scheduled-after-due.action      = schedule day before due|mod scheduled:<due-1d>, remove scheduled|mod scheduled:
+condition.scheduled-after-due.helpers     = calendar
 
 condition.orphans.description = Blocked tasks with completed/deleted parent
 condition.orphans.filter      = +PENDING +BLOCKED
 condition.orphans.msg         = Stale dependencies — parent task is no longer active
 condition.orphans.sort        = urgency-
-condition.orphans.action      = mod dep:
+condition.orphans.action      = remove dep|mod dep:
 condition.orphans.type        = orphans
 
 condition.diag-check.description = Taskwarrior diagnostic warnings
 condition.diag-check.filter      =
 condition.diag-check.msg         = Diagnostic issues found
-condition.diag-check.sort        =
-condition.diag-check.action      =
 condition.diag-check.type        = diag
