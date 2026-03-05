@@ -24,6 +24,12 @@ CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
 VERSION = '0.1.0'
 DIVIDER = '─' * 62
 
+BOLD   = '\033[1m'
+GREEN  = '\033[32m'
+CYAN   = '\033[36m'
+YELLOW = '\033[33m'
+RESET  = '\033[0m'
+
 
 # ============================================================================
 # Config
@@ -199,14 +205,36 @@ def show_task(task: dict):
     if deps:
         meta.append(f'deps:{len(deps)}')
 
-    print(f'\n  [{tid}] {desc}')
+    print(f'\n  {BOLD}{GREEN}[{tid}] {desc}{RESET}')
     if meta:
-        print(f'       {" · ".join(meta)}')
+        print(f'       {CYAN}{" · ".join(meta)}{RESET}')
 
 
 # ============================================================================
-# Readline prompt with pre-fill
+# Input helpers
 # ============================================================================
+
+def _getch() -> str:
+    """Read one keypress in raw mode; falls back to line input if not a TTY."""
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        return (line.strip()[:1] if line.strip() else '\r')
+    try:
+        import tty, termios
+    except ImportError:
+        ch = input().strip()
+        return ch[:1] if ch else '\r'
+    fd  = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+    return ch
+
 
 def prompt_prefill(prompt_text: str, prefill: str) -> str:
     try:
@@ -259,28 +287,54 @@ def review_condition(cond: dict, tasks: list) -> bool:
 
         done_count = total - len(remaining)
         show_task(task)
-        print(f'  ({done_count + 1}/{total}  s=skip  d=done  q=quit)')
 
-        tid    = task.get('id', '?')
-        action = compute_action(cond.get('action', ''), task)
-        prefill = f'task {tid} {action}' if action else f'task {tid} '
+        tid       = task.get('id', '?')
+        action    = compute_action(cond.get('action', ''), task)
+        suggested = f'task {tid} {action}' if action else ''
 
-        response = prompt_prefill('\n  Fix > ', prefill).strip()
+        if suggested:
+            print(f'\n  {YELLOW}⬥ {suggested}{RESET}')
+            print(f'  ({done_count + 1}/{total})  Enter=apply  e=edit  s=skip  d=done  q=quit')
+        else:
+            print(f'\n  ({done_count + 1}/{total})  e=edit  s=skip  d=done  q=quit  Enter=skip')
 
-        if response.lower() == 'q':
+        key = _getch()
+
+        if key in ('\x03', '\x1b', 'q', 'Q'):   # Ctrl-C, Esc, q
             return False
-        elif response.lower() in ('s', ''):
+
+        elif key in ('s', 'S') or (key in ('\r', '\n') and not suggested):
             skip_uuids.add(uuid)
             remaining.pop(0)
-        elif response.lower() == 'd':
-            subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
-            remaining.pop(0)
-        else:
-            result = subprocess.run(response.split())
+
+        elif key in ('\r', '\n'):   # Enter with a suggestion → apply it
+            result = subprocess.run(suggested.split())
             if result.returncode == 0:
                 remaining.pop(0)
             else:
-                print('  [command failed — edit and retry, or s to skip]')
+                print('  [command failed — press e to edit, s to skip]')
+
+        elif key in ('d', 'D'):
+            subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+            remaining.pop(0)
+
+        else:   # e, or any unrecognised key → editable prompt
+            prefill  = suggested if suggested else f'task {tid} '
+            response = prompt_prefill('  Fix > ', prefill).strip()
+            if not response or response.lower() == 's':
+                skip_uuids.add(uuid)
+                remaining.pop(0)
+            elif response.lower() == 'q':
+                return False
+            elif response.lower() == 'd':
+                subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+                remaining.pop(0)
+            else:
+                result = subprocess.run(response.split())
+                if result.returncode == 0:
+                    remaining.pop(0)
+                else:
+                    print('  [command failed — edit and retry, or s to skip]')
 
     print(f'\n  ✓ {name} complete')
     return True
