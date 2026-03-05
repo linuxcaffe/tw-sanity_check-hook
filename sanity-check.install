@@ -25,9 +25,9 @@ install() {
     tw_msg "Installing ${APPNAME} v${VERSION}..."
     mkdir -p "$SCRIPTS_DIR" "$CONFIG_DIR"
 
-    cp "${SCRIPT_DIR}/tw-sanity-check" "${SCRIPTS_DIR}/tw-sanity-check"
-    chmod +x "${SCRIPTS_DIR}/tw-sanity-check"
-    tw_msg "Installed: ${SCRIPTS_DIR}/tw-sanity-check"
+    cp "${SCRIPT_DIR}/sanity-check" "${SCRIPTS_DIR}/sanity-check"
+    chmod +x "${SCRIPTS_DIR}/sanity-check"
+    tw_msg "Installed: ${SCRIPTS_DIR}/sanity-check"
 
     if [[ -f "${CONFIG_DIR}/sanity.rc" ]]; then
         tw_msg "Config already exists: ${CONFIG_DIR}/sanity.rc (not overwritten)"
@@ -49,13 +49,13 @@ install() {
         grep -v "^${APPNAME}|" "$MANIFEST_FILE" > "${MANIFEST_FILE}.tmp" || true
         mv "${MANIFEST_FILE}.tmp" "$MANIFEST_FILE"
     fi
-    echo "${APPNAME}|${VERSION}|${SCRIPTS_DIR}/tw-sanity-check||${TIMESTAMP}" >> "$MANIFEST_FILE"
+    echo "${APPNAME}|${VERSION}|${SCRIPTS_DIR}/sanity-check||${TIMESTAMP}" >> "$MANIFEST_FILE"
     echo "${APPNAME}|${VERSION}|${CONFIG_DIR}/sanity.rc||${TIMESTAMP}"        >> "$MANIFEST_FILE"
 
     tw_success "Installed ${APPNAME} v${VERSION}"
     tw_msg "Next steps:"
     tw_msg "  1. Edit ${CONFIG_DIR}/sanity.rc"
-    tw_msg "  2. Run:  tw-sanity-check"
+    tw_msg "  2. Run:  sanity-check"
     tw_msg "  3. Or:   tw checkup"
 }
 

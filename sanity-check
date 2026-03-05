@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-tw-sanity-check — Review and fix common Taskwarrior inconsistencies
+sanity-check — Review and fix common Taskwarrior inconsistencies
 
 Usage:
-    tw-sanity-check               Status: issue counts per condition
-    tw-sanity-check all           Interactive review of all conditions
-    tw-sanity-check <condition>   Interactive review of one condition
+    sanity-check              Numbered menu: pick a condition to review
+    sanity-check all          Interactive review of all conditions
+    sanity-check <condition>  Interactive review of one condition
 
 Config:  ~/.task/config/sanity.rc
-Install: ~/.task/scripts/tw-sanity-check
+Install: ~/.task/scripts/sanity-check
 Version: 0.1.0
 """
 
@@ -287,32 +287,56 @@ def review_condition(cond: dict, tasks: list) -> bool:
 
 
 # ============================================================================
-# Status (no-args)
+# Menu (no-args)
 # ============================================================================
 
-def cmd_status(conditions: list):
+def cmd_menu(conditions: list):
     today = date.today().strftime('%Y-%m-%d')
     print(f'\nSanity check — {today}')
     print(DIVIDER)
 
-    rows = []
-    for cond in conditions:
-        n = len(collect_tasks(cond))
-        rows.append((cond['name'], n, cond.get('description', '')))
+    agenda = [(cond, collect_tasks(cond)) for cond in conditions]
+    total  = sum(len(tasks) for _, tasks in agenda)
+    width  = max(len(c['name']) for c in conditions) if conditions else 10
 
-    total = sum(n for _, n, _ in rows)
-    width = max(len(r[0]) for r in rows) if rows else 10
-
-    for name, n, desc in rows:
+    for i, (cond, tasks) in enumerate(agenda, 1):
+        n    = len(tasks)
         flag = '▶ ' if n else '  '
-        print(f'  {flag}{name:<{width}}  {n:>3}   {desc}')
+        desc = cond.get('description', '')
+        print(f'  {flag}{i:>2}. {cond["name"]:<{width}}  {n:>3}   {desc}')
 
     print(DIVIDER)
     if total == 0:
-        print('  All clear.')
+        print('  All clear.\n')
+        return
+
+    print(f'  {total} issue{"s" if total != 1 else ""}')
+    print()
+
+    try:
+        choice = input(f'  Select [1-{len(agenda)}]  a=all  q=quit > ').strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if not choice or choice == 'q':
+        return
+    elif choice == 'a':
+        selected = agenda
+    elif choice.isdigit() and 1 <= int(choice) <= len(agenda):
+        selected = [agenda[int(choice) - 1]]
     else:
-        print(f'  {total} issue{"s" if total != 1 else ""} — '
-              f'run \'tw-sanity-check all\' to review')
+        print(f'  Unknown: {choice!r}')
+        return
+
+    print()
+    for cond, tasks in selected:
+        if not tasks:
+            continue
+        if not review_condition(cond, tasks):
+            print('\n[sanity-check] Session ended.')
+            break
+
     print()
 
 
@@ -329,7 +353,7 @@ def main() -> int:
     args = sys.argv[1:]
 
     if not args:
-        cmd_status(conditions)
+        cmd_menu(conditions)
         return 0
 
     target = args[0].lower()
