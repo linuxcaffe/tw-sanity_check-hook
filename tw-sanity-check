@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""
+tw-sanity-check — Review and fix common Taskwarrior inconsistencies
+
+Usage:
+    tw-sanity-check               Status: issue counts per condition
+    tw-sanity-check all           Interactive review of all conditions
+    tw-sanity-check <condition>   Interactive review of one condition
+
+Config:  ~/.task/config/sanity.rc
+Install: ~/.task/scripts/tw-sanity-check
+Version: 0.1.0
+"""
+
+import json
+import re
+import subprocess
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
+VERSION = '0.1.0'
+DIVIDER = '─' * 62
+
+
+# ============================================================================
+# Config
+# ============================================================================
+
+def load_conditions(rc_file: Path) -> list:
+    """Parse condition.NAME.KEY = VALUE lines. Returns ordered list of dicts."""
+    raw = {}
+    order = []
+    if not rc_file.exists():
+        return []
+    with rc_file.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            k = k.strip()
+            v = v.split('#')[0].strip()
+            if not k.startswith('condition.'):
+                continue
+            parts = k.split('.', 2)
+            if len(parts) != 3:
+                continue
+            _, name, key = parts
+            if name not in raw:
+                raw[name] = {'name': name}
+                order.append(name)
+            raw[name][key] = v
+    return [raw[n] for n in order]
+
+
+# ============================================================================
+# Task fetching
+# ============================================================================
+
+_TASK_SAFE = ['task', 'rc.hooks=off', 'rc.confirmation=off',
+              'rc.verbose=nothing', 'rc.context=none']
+
+
+def task_export(filter_str: str) -> list:
+    filter_args = filter_str.split() if filter_str.strip() else []
+    cmd = _TASK_SAFE + filter_args + ['export']
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if not result.stdout.strip():
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def sort_tasks(tasks: list, sort_key: str) -> list:
+    if not sort_key:
+        return tasks
+    reverse = sort_key.endswith('-')
+    field = sort_key.rstrip('+-')
+    return sorted(tasks, key=lambda t: t.get(field, ''), reverse=reverse)
+
+
+def collect_orphans(filter_str: str) -> list:
+    """Find +BLOCKED tasks whose dep is no longer pending."""
+    all_pending = task_export('+PENDING')
+    pending_uuids = {t['uuid'] for t in all_pending}
+    blocked = task_export(filter_str or '+PENDING +BLOCKED')
+    orphans = []
+    for task in blocked:
+        for dep_uuid in task.get('depends', []):
+            if dep_uuid not in pending_uuids:
+                orphans.append(task)
+                break
+    return orphans
+
+
+def collect_diag() -> list:
+    """Run task diag, return pseudo-task dicts for each issue line."""
+    result = subprocess.run(['task', 'rc.hooks=off', 'diag'],
+                            capture_output=True, text=True)
+    issues = []
+    for line in result.stdout.split('\n'):
+        s = line.strip()
+        if s and any(w in s.lower() for w in ('error', 'not found', 'missing', 'no such')):
+            issues.append({'description': s, 'id': 0, 'uuid': s, '_diag': True})
+    return issues
+
+
+def collect_tasks(cond: dict) -> list:
+    ctype = cond.get('type', '')
+    if ctype == 'orphans':
+        tasks = collect_orphans(cond.get('filter', ''))
+    elif ctype == 'diag':
+        tasks = collect_diag()
+    else:
+        tasks = task_export(cond.get('filter', ''))
+    return sort_tasks(tasks, cond.get('sort', ''))
+
+
+# ============================================================================
+# Date utilities
+# ============================================================================
+
+def tw_to_date(tw_date: str) -> Optional[date]:
+    if not tw_date:
+        return None
+    try:
+        return datetime.strptime(tw_date[:8], '%Y%m%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+def fmt_date(tw_date: str) -> str:
+    d = tw_to_date(tw_date)
+    return d.strftime('%Y-%m-%d') if d else ''
+
+
+def age_str(tw_date: str) -> str:
+    d = tw_to_date(tw_date)
+    if not d:
+        return ''
+    delta = (date.today() - d).days
+    if delta == 0:
+        return 'today'
+    elif delta > 0:
+        return f'{delta}d ago'
+    else:
+        return f'in {-delta}d'
+
+
+_OFFSET_RE = re.compile(r'<(\w+)([+-]\d+[dwmy])?>')
+
+
+def compute_action(template: str, task: dict) -> str:
+    """Interpolate <field> and <field±Nd/w/m/y> tokens with real task dates."""
+    if not template:
+        return ''
+
+    def replace(m):
+        field = m.group(1)
+        offset = m.group(2) or ''
+        base = tw_to_date(task.get(field, ''))
+        if not base:
+            return m.group(0)
+        if offset:
+            sign = 1 if offset[0] == '+' else -1
+            num = int(offset[1:-1])
+            unit = offset[-1]
+            days = {'d': num, 'w': num * 7, 'm': num * 30, 'y': num * 365}[unit]
+            base = base + timedelta(days=days * sign)
+        return base.strftime('%Y-%m-%d')
+
+    return _OFFSET_RE.sub(replace, template)
+
+
+# ============================================================================
+# Display
+# ============================================================================
+
+def show_task(task: dict):
+    tid  = task.get('id', '?')
+    desc = task.get('description', '')
+    proj = task.get('project', '')
+    pri  = task.get('priority', '')
+
+    meta = []
+    if proj: meta.append(f'project:{proj}')
+    if pri:  meta.append(f'pri:{pri}')
+    for field in ('due', 'scheduled', 'wait', 'until'):
+        val = task.get(field, '')
+        if val:
+            meta.append(f'{field}:{fmt_date(val)} ({age_str(val)})')
+
+    deps = task.get('depends', [])
+    if deps:
+        meta.append(f'deps:{len(deps)}')
+
+    print(f'\n  [{tid}] {desc}')
+    if meta:
+        print(f'       {" · ".join(meta)}')
+
+
+# ============================================================================
+# Readline prompt with pre-fill
+# ============================================================================
+
+def prompt_prefill(prompt_text: str, prefill: str) -> str:
+    try:
+        import readline
+        readline.set_startup_hook(lambda: readline.insert_text(prefill))
+        try:
+            return input(prompt_text)
+        finally:
+            readline.set_startup_hook(None)
+    except ImportError:
+        return input(f'{prompt_text}[{prefill}] ')
+
+
+# ============================================================================
+# Review loop
+# ============================================================================
+
+def review_condition(cond: dict, tasks: list) -> bool:
+    """Interactive review of one condition. Returns False to quit session."""
+    name  = cond['name']
+    msg   = cond.get('msg', name)
+    total = len(tasks)
+
+    print(f'\n{"═" * 62}')
+    print(f'  {name} — {msg}')
+    print(f'  {total} task{"s" if total != 1 else ""}')
+    print(f'{"═" * 62}')
+
+    if not tasks:
+        print('  Nothing to fix.')
+        return True
+
+    # Diag conditions: informational only, no interactive fix
+    if cond.get('type') == 'diag':
+        for t in tasks:
+            print(f'  ▶ {t["description"]}')
+        input('\n  Press Enter to continue...')
+        return True
+
+    skip_uuids = set()
+    remaining  = list(tasks)
+
+    while remaining:
+        task = remaining[0]
+        uuid = task.get('uuid', '')
+
+        if uuid in skip_uuids:
+            remaining.pop(0)
+            continue
+
+        done_count = total - len(remaining)
+        show_task(task)
+        print(f'  ({done_count + 1}/{total}  s=skip  d=done  q=quit)')
+
+        tid    = task.get('id', '?')
+        action = compute_action(cond.get('action', ''), task)
+        prefill = f'task {tid} {action}' if action else f'task {tid} '
+
+        response = prompt_prefill('\n  Fix > ', prefill).strip()
+
+        if response.lower() == 'q':
+            return False
+        elif response.lower() in ('s', ''):
+            skip_uuids.add(uuid)
+            remaining.pop(0)
+        elif response.lower() == 'd':
+            subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+            remaining.pop(0)
+        else:
+            result = subprocess.run(response.split())
+            if result.returncode == 0:
+                remaining.pop(0)
+            else:
+                print('  [command failed — edit and retry, or s to skip]')
+
+    print(f'\n  ✓ {name} complete')
+    return True
+
+
+# ============================================================================
+# Status (no-args)
+# ============================================================================
+
+def cmd_status(conditions: list):
+    today = date.today().strftime('%Y-%m-%d')
+    print(f'\nSanity check — {today}')
+    print(DIVIDER)
+
+    rows = []
+    for cond in conditions:
+        n = len(collect_tasks(cond))
+        rows.append((cond['name'], n, cond.get('description', '')))
+
+    total = sum(n for _, n, _ in rows)
+    width = max(len(r[0]) for r in rows) if rows else 10
+
+    for name, n, desc in rows:
+        flag = '▶ ' if n else '  '
+        print(f'  {flag}{name:<{width}}  {n:>3}   {desc}')
+
+    print(DIVIDER)
+    if total == 0:
+        print('  All clear.')
+    else:
+        print(f'  {total} issue{"s" if total != 1 else ""} — '
+              f'run \'tw-sanity-check all\' to review')
+    print()
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main() -> int:
+    conditions = load_conditions(CONFIG_FILE)
+    if not conditions:
+        print(f'[sanity-check] No conditions found in {CONFIG_FILE}', file=sys.stderr)
+        return 1
+
+    args = sys.argv[1:]
+
+    if not args:
+        cmd_status(conditions)
+        return 0
+
+    target = args[0].lower()
+
+    if target == 'all':
+        selected = conditions
+    else:
+        selected = [c for c in conditions if c['name'] == target]
+        if not selected:
+            print(f'[sanity-check] Unknown condition: {target}', file=sys.stderr)
+            print(f'  Known: {", ".join(c["name"] for c in conditions)}',
+                  file=sys.stderr)
+            return 1
+
+    # Collect all tasks upfront (avoids double-export)
+    agenda = [(cond, collect_tasks(cond)) for cond in selected]
+    total  = sum(len(tasks) for _, tasks in agenda)
+
+    if total == 0:
+        print('\nAll clear — no issues found.')
+        return 0
+
+    # Summary before review
+    print(f'\nSanity check — {date.today().strftime("%Y-%m-%d")}')
+    for cond, tasks in agenda:
+        if tasks:
+            print(f'  ▶ {cond["name"]:<24} {len(tasks):>3} task{"s" if len(tasks) != 1 else ""}')
+    print()
+
+    for cond, tasks in agenda:
+        if not tasks:
+            continue
+        if not review_condition(cond, tasks):
+            print('\n[sanity-check] Session ended.')
+            break
+
+    print()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
