@@ -356,23 +356,44 @@ def _getch() -> str:
 
 
 def prompt_prefill(prompt_text: str, prefill: str) -> Optional[str]:
-    """Returns the edited string, or None if the user pressed Ctrl-C."""
+    """Returns the edited string, or None if the user pressed Ctrl-C.
+
+    Saves and restores terminal state around readline so that Ctrl-C cannot
+    leave the terminal in a broken state or leave a stale \\x03 in stdin that
+    the next _getch() would misread as 'quit'.
+    """
+    saved_tc = None
+    try:
+        import termios
+        saved_tc = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        pass
+
+    result = None
     try:
         import readline
         readline.set_startup_hook(lambda: readline.insert_text(prefill))
         try:
-            return input(prompt_text)
+            result = input(prompt_text)
         except KeyboardInterrupt:
             print()
-            return None
         finally:
             readline.set_startup_hook(None)
     except ImportError:
         try:
-            return input(f'{prompt_text}[{prefill}] ')
+            result = input(f'{prompt_text}[{prefill}] ')
         except KeyboardInterrupt:
             print()
-            return None
+    finally:
+        if saved_tc is not None:
+            try:
+                import termios
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved_tc)
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except Exception:
+                pass
+
+    return result
 
 
 # ============================================================================
