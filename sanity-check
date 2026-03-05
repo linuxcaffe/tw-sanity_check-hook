@@ -66,7 +66,9 @@ def load_rc(rc_file: Path) -> tuple:
 
 
 def parse_actions(action_str: str) -> list:
-    """Parse 'label|template, label|template, ...' → [(label, template), ...]."""
+    """Parse 'label|template, ...' → [(label, template, open_edit), ...].
+    If label is 'edit', selecting that numbered option opens readline instead
+    of running the command directly."""
     result = []
     for item in action_str.split(','):
         item = item.strip()
@@ -74,9 +76,10 @@ def parse_actions(action_str: str) -> list:
             continue
         if '|' in item:
             label, _, template = item.partition('|')
-            result.append((label.strip(), template.strip()))
+            label = label.strip()
+            result.append((label, template.strip(), label.lower() == 'edit'))
         else:
-            result.append(('', item.strip()))
+            result.append(('', item.strip(), False))
     return result
 
 
@@ -330,15 +333,15 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
 
         # Compute all actions for this task
         computed = []
-        for label, template in actions:
+        for label, template, open_edit in actions:
             cmd = compute_action(template, task)
-            computed.append((label, f'task {tid} {cmd}' if cmd else ''))
+            computed.append((label, f'task {tid} {cmd}' if cmd else '', open_edit))
 
         # Numbered fixes
         if computed:
             print()
-            lw = max((len(lbl) for lbl, _ in computed if lbl), default=0)
-            for i, (label, cmd) in enumerate(computed, 1):
+            lw = max((len(lbl) for lbl, _, _ in computed if lbl), default=0)
+            for i, (label, cmd, open_edit) in enumerate(computed, 1):
                 lbl_str = f'{label:<{lw}}  ' if label else ''
                 print(f'  {YELLOW}{i}{RESET}  {lbl_str}{cmd}')
 
@@ -392,8 +395,28 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
                         print('  [command failed — edit and retry, or s to skip]')
 
         elif key.isdigit() and 1 <= int(key) <= len(computed):
-            cmd = computed[int(key) - 1][1]
-            if cmd:
+            label, cmd, open_edit = computed[int(key) - 1]
+            if open_edit:
+                response = prompt_prefill('  Fix > ', cmd or f'task {tid} ')
+                if response is None:
+                    pass  # Ctrl-C → loop back
+                else:
+                    response = response.strip()
+                    if not response or response.lower() == 's':
+                        skip_uuids.add(uuid)
+                        remaining.pop(0)
+                    elif response.lower() == 'q':
+                        return False
+                    elif response.lower() == 'd':
+                        subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+                        remaining.pop(0)
+                    else:
+                        result = subprocess.run(response.split())
+                        if result.returncode == 0:
+                            remaining.pop(0)
+                        else:
+                            print('  [command failed — edit and retry, or s to skip]')
+            elif cmd:
                 result = subprocess.run(cmd.split())
                 if result.returncode == 0:
                     remaining.pop(0)
@@ -513,4 +536,8 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
