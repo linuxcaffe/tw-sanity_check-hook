@@ -258,16 +258,24 @@ def _getch() -> str:
     return ch
 
 
-def prompt_prefill(prompt_text: str, prefill: str) -> str:
+def prompt_prefill(prompt_text: str, prefill: str) -> Optional[str]:
+    """Returns the edited string, or None if the user pressed Ctrl-C."""
     try:
         import readline
         readline.set_startup_hook(lambda: readline.insert_text(prefill))
         try:
             return input(prompt_text)
+        except KeyboardInterrupt:
+            print()
+            return None
         finally:
             readline.set_startup_hook(None)
     except ImportError:
-        return input(f'{prompt_text}[{prefill}] ')
+        try:
+            return input(f'{prompt_text}[{prefill}] ')
+        except KeyboardInterrupt:
+            print()
+            return None
 
 
 # ============================================================================
@@ -338,7 +346,7 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
         hotkeys = []
         if has_cal:
             hotkeys.append('c=calendar')
-        hotkeys += ['e=edit', 's=skip', 'd=done', 'q=quit']
+        hotkeys += ['i=info', 'e=edit', 's=skip', 'd=done', 'q=quit']
         print(f'\n  ({done_count + 1}/{total})  {CYAN}{"  ".join(hotkeys)}{RESET}  Enter=skip')
 
         key = _getch()
@@ -358,23 +366,30 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             subprocess.run(['task', 'cal'])
             # loop — task shown again after returning from cal
 
+        elif key in ('i', 'I'):
+            subprocess.run(['task', str(tid), 'info'])
+            # loop — task shown again after returning from info
+
         elif key in ('e', 'E'):
-            prefill  = computed[0][1] if computed else f'task {tid} '
-            response = prompt_prefill('  Fix > ', prefill).strip()
-            if not response or response.lower() == 's':
-                skip_uuids.add(uuid)
-                remaining.pop(0)
-            elif response.lower() == 'q':
-                return False
-            elif response.lower() == 'd':
-                subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
-                remaining.pop(0)
+            response = prompt_prefill('  Fix > ', f'task {tid} ')
+            if response is None:
+                pass  # Ctrl-C → loop back, show task again
             else:
-                result = subprocess.run(response.split())
-                if result.returncode == 0:
+                response = response.strip()
+                if not response or response.lower() == 's':
+                    skip_uuids.add(uuid)
+                    remaining.pop(0)
+                elif response.lower() == 'q':
+                    return False
+                elif response.lower() == 'd':
+                    subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
                     remaining.pop(0)
                 else:
-                    print('  [command failed — edit and retry, or s to skip]')
+                    result = subprocess.run(response.split())
+                    if result.returncode == 0:
+                        remaining.pop(0)
+                    else:
+                        print('  [command failed — edit and retry, or s to skip]')
 
         elif key.isdigit() and 1 <= int(key) <= len(computed):
             cmd = computed[int(key) - 1][1]
