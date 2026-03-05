@@ -9,7 +9,7 @@ Usage:
 
 Config:  ~/.task/config/sanity.rc
 Install: ~/.task/scripts/sanity-check
-Version: 0.2.0
+Version: 0.3.0
 """
 
 import json
@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Optional
 
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
-VERSION = '0.2.0'
-DIVIDER = '─' * 62
+HOOKS_DIR   = Path.home() / '.task' / 'hooks'
+VERSION     = '0.3.0'
+DIVIDER     = '─' * 62
 
 BOLD   = '\033[1m'
 GREEN  = '\033[32m'
@@ -87,8 +88,9 @@ def parse_actions(action_str: str) -> list:
 # Task fetching
 # ============================================================================
 
-_TASK_SAFE = ['task', 'rc.hooks=off', 'rc.confirmation=off',
-              'rc.verbose=nothing', 'rc.context=none']
+_TASK_SAFE  = ['task', 'rc.hooks=off', 'rc.confirmation=off',
+               'rc.verbose=nothing', 'rc.context=none']
+_diag_cache: Optional[str] = None
 
 
 def task_export(filter_str: str) -> list:
@@ -113,7 +115,7 @@ def sort_tasks(tasks: list, sort_key: str) -> list:
 
 def collect_orphans(filter_str: str) -> list:
     """Find +BLOCKED tasks whose dep is no longer pending."""
-    all_pending = task_export('+PENDING')
+    all_pending  = task_export('+PENDING')
     pending_uuids = {t['uuid'] for t in all_pending}
     blocked = task_export(filter_str or '+PENDING +BLOCKED')
     orphans = []
@@ -125,15 +127,104 @@ def collect_orphans(filter_str: str) -> list:
     return orphans
 
 
-def collect_diag() -> list:
-    """Run task diag, return pseudo-task dicts for each issue line."""
-    result = subprocess.run(['task', 'rc.hooks=off', 'diag'],
-                            capture_output=True, text=True)
+def _run_diag() -> str:
+    global _diag_cache
+    if _diag_cache is None:
+        result = subprocess.run(['task', 'rc.hooks=off', 'diag'],
+                                capture_output=True, text=True)
+        _diag_cache = result.stdout
+    return _diag_cache
+
+
+def collect_diag_hooks() -> list:
+    """Inactive hooks from task diag — skips library files (not starting with on-)."""
+    diag = _run_diag()
     issues = []
-    for line in result.stdout.split('\n'):
-        s = line.strip()
-        if s and any(w in s.lower() for w in ('error', 'not found', 'missing', 'no such')):
-            issues.append({'description': s, 'id': 0, 'uuid': s, '_diag': True})
+    in_inactive = False
+
+    for line in diag.split('\n'):
+        if re.search(r'\bInactive:', line):
+            in_inactive = True
+        elif in_inactive and re.match(r'^\s{0,12}\w[\w -]*:', line):
+            in_inactive = False  # new labeled field, end of inactive block
+
+        if not in_inactive:
+            continue
+
+        content = re.sub(r'^\s+(?:Inactive:\s*)?', '', line)
+        m = re.match(r'(\S+)\s+\(([^)]+)\)', content)
+        if not m:
+            continue
+        filename, reason = m.group(1), m.group(2)
+        if not filename.startswith('on-'):
+            continue  # library file — expected to be non-executable/unrecognised
+        hook_path = str(HOOKS_DIR / filename)
+        issues.append({
+            'id': 0, 'uuid': filename,
+            'description': f'{filename}  ({reason})',
+            '_actions': [('make executable', f'chmod +x {hook_path}')],
+        })
+    return issues
+
+
+_BROKEN_RE = re.compile(
+    r'Task ([0-9a-f-]{36}) depends on nonexistent task: ([0-9a-f-]{36})'
+)
+
+
+def collect_diag_broken() -> list:
+    """Tasks with broken dep references (dep UUID no longer exists at all)."""
+    diag = _run_diag()
+    broken: dict = {}
+    for line in diag.split('\n'):
+        m = _BROKEN_RE.search(line)
+        if m:
+            broken.setdefault(m.group(1), []).append(m.group(2))
+
+    if not broken:
+        return []
+
+    # Look up real task info; broken-dep tasks are typically +BLOCKED
+    candidates = task_export('+PENDING +BLOCKED')
+    by_uuid = {t['uuid']: t for t in candidates}
+
+    results = []
+    for task_uuid, dep_uuids in broken.items():
+        task = by_uuid.get(task_uuid)
+        if not task:
+            found = task_export(f'uuid:{task_uuid}')
+            task = found[0] if found else {
+                'uuid': task_uuid, 'id': 0,
+                'description': f'Unknown task {task_uuid[:8]}',
+            }
+        tid  = task.get('id') or 0
+        n    = len(dep_uuids)
+        args = ' '.join(f'dep:-{d}' for d in dep_uuids)
+        task = dict(task)
+        task['_actions'] = [(
+            f'remove {n} broken dep{"s" if n > 1 else ""}',
+            f'task {tid} modify {args}' if tid else '',
+        )]
+        results.append(task)
+    return results
+
+
+_DUP_RE = re.compile(r'Found duplicate ([0-9a-f-]{36})')
+
+
+def collect_diag_dups() -> list:
+    """Duplicate UUIDs reported by task diag — informational."""
+    diag = _run_diag()
+    issues = []
+    for line in diag.split('\n'):
+        m = _DUP_RE.search(line)
+        if m:
+            dup_uuid = m.group(1)
+            issues.append({
+                'id': 0, 'uuid': dup_uuid,
+                'description': f'Duplicate UUID: {dup_uuid}',
+                '_diag': True,
+            })
     return issues
 
 
@@ -141,8 +232,12 @@ def collect_tasks(cond: dict) -> list:
     ctype = cond.get('type', '')
     if ctype == 'orphans':
         tasks = collect_orphans(cond.get('filter', ''))
-    elif ctype == 'diag':
-        tasks = collect_diag()
+    elif ctype == 'diag-hooks':
+        tasks = collect_diag_hooks()
+    elif ctype == 'diag-broken':
+        tasks = collect_diag_broken()
+    elif ctype == 'diag-dups':
+        tasks = collect_diag_dups()
     else:
         tasks = task_export(cond.get('filter', ''))
     return sort_tasks(tasks, cond.get('sort', ''))
@@ -171,12 +266,9 @@ def age_str(tw_date: str) -> str:
     if not d:
         return ''
     delta = (date.today() - d).days
-    if delta == 0:
-        return 'today'
-    elif delta > 0:
-        return f'{delta}d ago'
-    else:
-        return f'in {-delta}d'
+    if delta == 0:   return 'today'
+    elif delta > 0:  return f'{delta}d ago'
+    else:            return f'in {-delta}d'
 
 
 _OFFSET_RE = re.compile(r'<(\w+)([+-]\d+[dwmy])?>')
@@ -188,14 +280,14 @@ def compute_action(template: str, task: dict) -> str:
         return ''
 
     def replace(m):
-        field = m.group(1)
+        field  = m.group(1)
         offset = m.group(2) or ''
-        base = date.today() if field == 'today' else tw_to_date(task.get(field, ''))
+        base   = date.today() if field == 'today' else tw_to_date(task.get(field, ''))
         if not base:
             return m.group(0)
         if offset:
             sign = 1 if offset[0] == '+' else -1
-            num = int(offset[1:-1])
+            num  = int(offset[1:-1])
             unit = offset[-1]
             days = {'d': num, 'w': num * 7, 'm': num * 30, 'y': num * 365}[unit]
             base = base + timedelta(days=days * sign)
@@ -213,7 +305,7 @@ def clear_screen():
 
 
 def show_task(task: dict):
-    tid  = task.get('id', '?')
+    tid  = task.get('id') or 0
     desc = task.get('description', '')
     proj = task.get('project', '')
     pri  = task.get('priority', '')
@@ -225,12 +317,14 @@ def show_task(task: dict):
         val = task.get(field, '')
         if val:
             meta.append(f'{field}:{fmt_date(val)} ({age_str(val)})')
-
     deps = task.get('depends', [])
     if deps:
         meta.append(f'deps:{len(deps)}')
 
-    print(f'\n  {BOLD}{GREEN}[{tid}] {desc}{RESET}')
+    if tid:
+        print(f'\n  {BOLD}{GREEN}[{tid}] {desc}{RESET}')
+    else:
+        print(f'\n  {BOLD}{GREEN}{desc}{RESET}')
     if meta:
         print(f'       {CYAN}{" · ".join(meta)}{RESET}')
 
@@ -285,13 +379,40 @@ def prompt_prefill(prompt_text: str, prefill: str) -> Optional[str]:
 # Review loop
 # ============================================================================
 
+def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
+              remaining: list) -> Optional[bool]:
+    """Open readline edit prompt. Returns True=advanced, False=quit, None=loop."""
+    response = prompt_prefill('  Fix > ', prefill)
+    if response is None:
+        return None  # Ctrl-C → loop
+    response = response.strip()
+    if not response or response.lower() == 's':
+        skip_uuids.add(uuid)
+        remaining.pop(0)
+        return True
+    elif response.lower() == 'q':
+        return False
+    elif response.lower() == 'd' and tid:
+        subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+        remaining.pop(0)
+        return True
+    else:
+        result = subprocess.run(response.split())
+        if result.returncode == 0:
+            remaining.pop(0)
+            return True
+        else:
+            print('  [command failed — edit and retry, or s to skip]')
+            return None
+
+
 def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
     """Interactive review of one condition. Returns False to quit session."""
-    name     = cond['name']
-    msg      = cond.get('msg', name)
-    total    = len(tasks)
-    has_cal  = 'calendar' in cond.get('helpers', '')
-    actions  = parse_actions(cond.get('action', ''))
+    name    = cond['name']
+    msg     = cond.get('msg', name)
+    total   = len(tasks)
+    has_cal = 'calendar' in cond.get('helpers', '')
+    actions = parse_actions(cond.get('action', ''))
 
     if clear_term == 'condition':
         clear_screen()
@@ -305,8 +426,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
         print('  Nothing to fix.')
         return True
 
-    # Diag conditions: informational only
-    if cond.get('type') == 'diag':
+    # Informational-only conditions
+    if cond.get('type') in ('diag', 'diag-dups'):
         for t in tasks:
             print(f'  ▶ {t["description"]}')
         input('\n  Press Enter to continue...')
@@ -329,13 +450,17 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
         done_count = total - len(remaining)
         show_task(task)
 
-        tid = task.get('id', '?')
+        tid       = task.get('id') or 0
+        is_pseudo = not bool(tid)
 
-        # Compute all actions for this task
-        computed = []
-        for label, template, open_edit in actions:
-            cmd = compute_action(template, task)
-            computed.append((label, f'task {tid} {cmd}' if cmd else '', open_edit))
+        # Actions: per-task prebuilt (_actions) or computed from condition template
+        if '_actions' in task:
+            computed = [(lbl, cmd, False) for lbl, cmd in task['_actions']]
+        else:
+            computed = []
+            for label, template, open_edit in actions:
+                cmd = compute_action(template, task)
+                computed.append((label, f'task {tid} {cmd}' if cmd else '', open_edit))
 
         # Numbered fixes
         if computed:
@@ -345,11 +470,13 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
                 lbl_str = f'{label:<{lw}}  ' if label else ''
                 print(f'  {YELLOW}{i}{RESET}  {lbl_str}{cmd}')
 
-        # Letter hotkeys
+        # Letter hotkeys — suppress task-specific ones for pseudo-tasks
         hotkeys = []
-        if has_cal:
+        if has_cal and not is_pseudo:
             hotkeys.append('c=calendar')
-        hotkeys += ['i=info', 'e=edit', 's=skip', 'd=done', 'q=quit']
+        if not is_pseudo:
+            hotkeys += ['i=info', 'e=edit', 'd=done']
+        hotkeys += ['s=skip', 'q=quit']
         print(f'\n  ({done_count + 1}/{total})  {CYAN}{"  ".join(hotkeys)}{RESET}  Enter=skip')
 
         key = _getch()
@@ -361,61 +488,29 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             skip_uuids.add(uuid)
             remaining.pop(0)
 
-        elif key in ('d', 'D'):
+        elif key in ('d', 'D') and not is_pseudo:
             subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
             remaining.pop(0)
 
-        elif key in ('c', 'C') and has_cal:
+        elif key in ('c', 'C') and has_cal and not is_pseudo:
             subprocess.run(['task', 'cal'])
-            # loop — task shown again after returning from cal
+            # loop — task shown again
 
-        elif key in ('i', 'I'):
+        elif key in ('i', 'I') and not is_pseudo:
             subprocess.run(['task', str(tid), 'info'])
-            # loop — task shown again after returning from info
+            # loop — task shown again
 
-        elif key in ('e', 'E'):
-            response = prompt_prefill('  Fix > ', f'task {tid} ')
-            if response is None:
-                pass  # Ctrl-C → loop back, show task again
-            else:
-                response = response.strip()
-                if not response or response.lower() == 's':
-                    skip_uuids.add(uuid)
-                    remaining.pop(0)
-                elif response.lower() == 'q':
-                    return False
-                elif response.lower() == 'd':
-                    subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
-                    remaining.pop(0)
-                else:
-                    result = subprocess.run(response.split())
-                    if result.returncode == 0:
-                        remaining.pop(0)
-                    else:
-                        print('  [command failed — edit and retry, or s to skip]')
+        elif key in ('e', 'E') and not is_pseudo:
+            r = _run_edit(f'task {tid} ', tid, skip_uuids, uuid, remaining)
+            if r is False:
+                return False
 
         elif key.isdigit() and 1 <= int(key) <= len(computed):
             label, cmd, open_edit = computed[int(key) - 1]
             if open_edit:
-                response = prompt_prefill('  Fix > ', cmd or f'task {tid} ')
-                if response is None:
-                    pass  # Ctrl-C → loop back
-                else:
-                    response = response.strip()
-                    if not response or response.lower() == 's':
-                        skip_uuids.add(uuid)
-                        remaining.pop(0)
-                    elif response.lower() == 'q':
-                        return False
-                    elif response.lower() == 'd':
-                        subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
-                        remaining.pop(0)
-                    else:
-                        result = subprocess.run(response.split())
-                        if result.returncode == 0:
-                            remaining.pop(0)
-                        else:
-                            print('  [command failed — edit and retry, or s to skip]')
+                r = _run_edit(cmd or f'task {tid} ', tid, skip_uuids, uuid, remaining)
+                if r is False:
+                    return False
             elif cmd:
                 result = subprocess.run(cmd.split())
                 if result.returncode == 0:

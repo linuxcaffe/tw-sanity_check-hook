@@ -68,7 +68,14 @@ condition.orphans.sort        = urgency-
 condition.orphans.action      = remove dep|mod dep:
 condition.orphans.type        = orphans
 
-condition.diag-check.description = Taskwarrior diagnostic warnings
-condition.diag-check.filter      =
-condition.diag-check.msg         = Diagnostic issues found
-condition.diag-check.type        = diag
+condition.diag-hooks.description = Hooks that are inactive or not executable
+condition.diag-hooks.msg         = Hook problems found — library files excluded
+condition.diag-hooks.type        = diag-hooks
+
+condition.diag-broken.description = Tasks with broken dependency references
+condition.diag-broken.msg         = Dependency UUID no longer exists in task database
+condition.diag-broken.type        = diag-broken
+
+condition.diag-dups.description = Tasks with duplicate UUIDs
+condition.diag-dups.msg         = Duplicate UUIDs — manual investigation needed
+condition.diag-dups.type        = diag-dups
