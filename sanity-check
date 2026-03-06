@@ -9,7 +9,7 @@ Usage:
 
 Config:  ~/.task/config/sanity.rc
 Install: ~/.task/scripts/sanity-check
-Version: 0.3.0
+Version: 0.4.0
 """
 
 import json
@@ -23,10 +23,11 @@ from typing import Optional
 
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
 HOOKS_DIR   = Path.home() / '.task' / 'hooks'
-VERSION     = '0.3.0'
+VERSION     = '0.4.0'
 DIVIDER     = '─' * 62
 
 BOLD   = '\033[1m'
+DIM    = '\033[2m'
 GREEN  = '\033[32m'
 CYAN   = '\033[36m'
 YELLOW = '\033[33m'
@@ -90,7 +91,8 @@ def parse_actions(action_str: str) -> list:
 
 _TASK_SAFE  = ['task', 'rc.hooks=off', 'rc.confirmation=off',
                'rc.verbose=nothing', 'rc.context=none']
-_diag_cache: Optional[str] = None
+_diag_cache:  Optional[str]  = None
+_stats_cache: Optional[dict] = None
 
 
 def task_export(filter_str: str) -> list:
@@ -134,6 +136,51 @@ def _run_diag() -> str:
                                 capture_output=True, text=True)
         _diag_cache = result.stdout
     return _diag_cache
+
+
+def _run_stats() -> dict:
+    global _stats_cache
+    if _stats_cache is None:
+        result = subprocess.run(
+            ['task', 'rc.hooks=off', 'rc.context=none', 'stats'],
+            capture_output=True, text=True,
+        )
+        _stats_cache = {}
+        for line in result.stdout.split('\n'):
+            m = re.match(r'^([A-Za-z][\w ]*?)\s{2,}(\d[\d,]*)', line)
+            if m:
+                _stats_cache[m.group(1).rstrip()] = m.group(2).replace(',', '')
+    return _stats_cache
+
+
+def _parse_diag_header() -> dict:
+    """Extract version, platform, config file, data location from cached diag."""
+    diag = _run_diag()
+    info = {'version': '', 'platform': '', 'file': '', 'data': ''}
+    home = str(Path.home())
+    for line in diag.split('\n'):
+        s = line.strip()
+        if not info['version']:
+            m = re.match(r'(?:task|Taskwarrior)\s+(\d[\d.]+)', s, re.I)
+            if m:
+                info['version'] = f'task {m.group(1)}'
+        if not info['platform']:
+            m = re.search(r'Platform[:\s]+(\w+)', s, re.I)
+            if m:
+                info['platform'] = m.group(1)
+        if not info['file']:
+            m = re.search(r'\bFile[:\s]+(/[^\s(]+)', s)
+            if m:
+                path = m.group(1).replace(home, '~')
+                status = ' (found)' if 'found' in s else ' (missing)' if 'missing' in s else ''
+                info['file'] = path + status
+        if not info['data']:
+            m = re.search(r'\bLocation[:\s]+(/[^\s(]+)', s)
+            if m:
+                path = m.group(1).rstrip('/').replace(home, '~')
+                status = ' (found)' if 'found' in s else ' (missing)' if 'missing' in s else ''
+                info['data'] = path + status
+    return info
 
 
 def collect_diag_hooks() -> list:
@@ -184,26 +231,20 @@ def collect_diag_broken() -> list:
     if not broken:
         return []
 
-    # Look up real task info; broken-dep tasks are typically +BLOCKED
-    candidates = task_export('+PENDING +BLOCKED')
-    by_uuid = {t['uuid']: t for t in candidates}
-
+    # UUID-based lookup — works on any status (pending/completed/deleted)
     results = []
     for task_uuid, dep_uuids in broken.items():
-        task = by_uuid.get(task_uuid)
-        if not task:
-            found = task_export(f'uuid:{task_uuid}')
-            task = found[0] if found else {
-                'uuid': task_uuid, 'id': 0,
-                'description': f'Unknown task {task_uuid[:8]}',
-            }
-        tid  = task.get('id') or 0
+        found = task_export(f'uuid:{task_uuid}')
+        task = found[0] if found else {
+            'uuid': task_uuid, 'id': 0,
+            'description': f'Unknown task {task_uuid[:8]}',
+        }
         n    = len(dep_uuids)
         args = ' '.join(f'dep:-{d}' for d in dep_uuids)
         task = dict(task)
         task['_actions'] = [(
             f'remove {n} broken dep{"s" if n > 1 else ""}',
-            f'task {tid} modify {args}' if tid else '',
+            f'task rc.confirmation=off rc.verbose=nothing uuid:{task_uuid} modify {args}',
         )]
         results.append(task)
     return results
@@ -551,9 +592,44 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
 # Menu (no-args)
 # ============================================================================
 
+def _rjust_line(left: str, right: str) -> str:
+    """Left content + right-justified label within DIVIDER width."""
+    pad = len(DIVIDER) - len(left) - len(right)
+    return left + ' ' * max(pad, 2) + right
+
+
 def cmd_menu(conditions: list, clear_term: str = 'no'):
     today = date.today().strftime('%Y-%m-%d')
-    print(f'\nSanity check — {today}')
+    diag  = _parse_diag_header()
+    stats = _run_stats()
+
+    print(f'\nTaskwarrior Sanity check — {today}')
+    print(DIVIDER)
+
+    ver_plat = diag['version']
+    if diag['platform']:
+        ver_plat += f' - Platform: {diag["platform"]}'
+    if ver_plat:
+        print(ver_plat)
+    if diag['file']:
+        print(f'File:{diag["file"]}')
+    if diag['data']:
+        print(_rjust_line(f'Data:{diag["data"]}', 'see: task diag'))
+
+    print(DIVIDER)
+
+    stat_keys = ['Pending', 'Waiting', 'Recurring', 'Completed', 'Deleted', 'Total']
+    W = 20
+    for key in stat_keys:
+        val = stats.get(key, '')
+        if not val:
+            continue
+        left = f'{key:<{W}}{val:>6}'
+        if key == 'Total':
+            print(_rjust_line(left, 'see: task stats'))
+        else:
+            print(left)
+
     print(DIVIDER)
 
     agenda = [(cond, collect_tasks(cond)) for cond in conditions]
@@ -564,7 +640,8 @@ def cmd_menu(conditions: list, clear_term: str = 'no'):
         n    = len(tasks)
         flag = '▶ ' if n else '  '
         desc = cond.get('description', '')
-        print(f'  {flag}{i:>2}. {cond["name"]:<{width}}  {n:>3}   {desc}')
+        row  = f'  {flag}{i:>2}. {cond["name"]:<{width}}  {n:>3}   {desc}'
+        print(f'{DIM}{row}{RESET}' if n == 0 else row)
 
     print(DIVIDER)
     if total == 0:
@@ -572,19 +649,34 @@ def cmd_menu(conditions: list, clear_term: str = 'no'):
         return
 
     print(f'  {total} issue{"s" if total != 1 else ""}')
-    print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
 
-    key = _getch()
+    use_getch = len(agenda) < 10
+    if use_getch:
+        print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
+        key = _getch()
+    else:
+        print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
+        try:
+            key = input('  > ').strip() or '\r'
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
 
     if not key or key in ('\x03', '\x1b', 'q', 'Q', '\r', '\n'):
         return
-    elif key == 'a':
+    elif key.lower() == 'a':
         selected = agenda
-    elif key.isdigit() and 1 <= int(key) <= len(agenda):
-        selected = [agenda[int(key) - 1]]
     else:
-        print(f'  Unknown: {key!r}')
-        return
+        try:
+            n = int(key)
+            if 1 <= n <= len(agenda):
+                selected = [agenda[n - 1]]
+            else:
+                print(f'  Out of range: {n}')
+                return
+        except ValueError:
+            print(f'  Unknown: {key!r}')
+            return
 
     print()
     for cond, tasks in selected:
