@@ -21,45 +21,45 @@ sanity.clear-term = task
 
 condition.late-due.description = Tasks with past due dates
 condition.late-due.filter      = +PENDING due.before:today-2d
-condition.late-due.msg         = These tasks are overdue
+condition.late-due.msg         = This task is overdue! - reschedule or clear
 condition.late-due.sort        = due+
-condition.late-due.action      = reschedule +1w|mod due:<today+1w>, reschedule +1m|mod due:<today+1m>, remove due|mod due:
+condition.late-due.action      = edit|mod due:, due tomorrow|mod due:<today+1d>, due next week|mod due:<today+7d>, clear due date|mod due:
 condition.late-due.helpers     = calendar
 
 condition.late-sched.description = Tasks with past scheduled dates
-condition.late-sched.filter      = +PENDING scheduled.before:today
-condition.late-sched.msg         = Past scheduled date — reschedule or clear
+condition.late-sched.filter      = +PENDING scheduled.before:today-1d
+condition.late-sched.msg         = This task is past it's sched:date — reschedule or clear
 condition.late-sched.sort        = scheduled+
-condition.late-sched.action      = reschedule +1w|mod scheduled:<today+1w>, reschedule +1m|mod scheduled:<today+1m>, remove scheduled|mod scheduled:
+condition.late-sched.action      = edit|mod scheduled:, do it tomorrow|mod scheduled:<today+1d>, do it next week|mod scheduled:<today+7d>, clear scheduled:date|mod scheduled:
 condition.late-sched.helpers     = calendar
 
-condition.scheduled-after-due.description = Scheduled date is after due date
+condition.scheduled-after-due.description = Scheduled date is after due:date
 condition.scheduled-after-due.filter      = +PENDING scheduled.after:due
-condition.scheduled-after-due.msg         = Scheduled too late — won't appear in time
-condition.scheduled-after-due.sort        = due+
-condition.scheduled-after-due.action      = schedule day before due|mod scheduled:<due-1d>, remove scheduled|mod scheduled:
+condition.scheduled-after-due.msg         = Tasks should be scheduled before they are due
+condition.scheduled-after-due.sort        = due+,scheduled+
+condition.scheduled-after-due.action      = edit|mod scheduled:, sched:due-1d|mod scheduled:<due-1d>, sched:due-1w|mod scheduled:due-1w, clear scheduled:date|mod scheduled:
 condition.scheduled-after-due.helpers     = calendar
 
-condition.until-before-due.description = Task expires before its due date
-condition.until-before-due.filter      = +PENDING until.before:due
-condition.until-before-due.msg         = Until is before due — task will vanish too soon
-condition.until-before-due.sort        = due+
-condition.until-before-due.action      = until week after due|mod until:<due+1w>, remove until|mod until:
-condition.until-before-due.helpers     = calendar
+condition.until-before-due-sched.description = Task expires before its due or scheduled date
+condition.until-before-due-sched.filter      = +PENDING ( until.before:due or until.before:scheduled )
+condition.until-before-due-sched.msg         = This task will be deleted before it is due!
+condition.until-before-due-sched.sort        = due+
+condition.until-before-due-sched.action      = edit|mod until:, expire 1 day after due|mod until:<due+1w>, clear until:date|mod until:
+condition.until-before-due-sched.helpers     = calendar
 
-condition.wait-after-due.description = Wait date is after due date
-condition.wait-after-due.filter      = +PENDING wait.after:due
-condition.wait-after-due.msg         = Task will appear in the list after it's already due
-condition.wait-after-due.sort        = due+
-condition.wait-after-due.action      = wait day before due|mod wait:<due-1d>, remove wait|mod wait:
-condition.wait-after-due.helpers     = calendar
+condition.wait-after-due-sched.description = Wait date is after due or sched date (hidden until it's late)
+condition.wait-after-due-sched.filter      = +PENDING ( wait.after:due or wait.after:scheduled )
+condition.wait-after-due-sched.msg         = Task will appear in the list after it's already due
+condition.wait-after-due-sched.sort        = due+,scheduled+
+condition.wait-after-due-sched.action      = edit|mod wait:, wait:due-1d|mod wait:<due-1d>, wait:due-1w|mod wait:due-1w, clear wait:date|mod wait:
+condition.wait-after-due-sched.helpers     = calendar
 
-condition.wait-after-scheduled.description = Wait date is after scheduled date
-condition.wait-after-scheduled.filter      = +PENDING wait.after:scheduled
-condition.wait-after-scheduled.msg         = Task will appear after its scheduled time
-condition.wait-after-scheduled.sort        = scheduled+
-condition.wait-after-scheduled.action      = wait day before scheduled|mod wait:<scheduled-1d>, remove wait|mod wait:
-condition.wait-after-scheduled.helpers     = calendar
+#condition.wait-after-scheduled.description = Wait date is after scheduled date
+#condition.wait-after-scheduled.filter      = +PENDING wait.after:scheduled
+#condition.wait-after-scheduled.msg         = Task will appear after its scheduled time
+#condition.wait-after-scheduled.sort        = scheduled+
+#condition.wait-after-scheduled.action      = wait day before scheduled|mod wait:<scheduled-1d>, remove wait|mod wait:
+#condition.wait-after-scheduled.helpers     = calendar
 
 condition.orphans.description = Blocked tasks with completed/deleted parent
 condition.orphans.filter      = +PENDING +BLOCKED
