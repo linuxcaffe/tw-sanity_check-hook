@@ -500,6 +500,7 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
     show_cal   = False
 
     _CAL_CMD = ['task',
+                'rc.verbose=nothing',
                 'rc.calendar.details=none',
                 'rc.calendar.legend=0',
                 'rc.calendar.monthsperline=4',
@@ -573,8 +574,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             # loop — re-renders with/without calendar
 
         elif key in ('i', 'I') and not is_pseudo:
-            subprocess.run(['task', 'rc.journal.info=0', 'rc.hooks=off',
-                            str(tid), 'info'])
+            subprocess.run(['task', 'rc.verbose=nothing', 'rc.journal.info=0',
+                            'rc.hooks=off', str(tid), 'info'])
             _getch()  # any key to dismiss, then re-render
 
         elif key.isdigit() and 1 <= int(key) <= len(computed):
