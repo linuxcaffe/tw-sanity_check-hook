@@ -497,6 +497,14 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
 
     skip_uuids = set()
     remaining  = list(tasks)
+    show_cal   = False
+
+    _CAL_CMD = ['task',
+                'rc.calendar.details=none',
+                'rc.calendar.legend=0',
+                'rc.calendar.monthsperline=4',
+                'rc.displayweeknumber=0',
+                'calendar']
 
     while remaining:
         task = remaining[0]
@@ -511,6 +519,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             # Re-show condition context after clear
             print(f'  {CYAN}{name}{RESET} — {msg}')
             print(DIVIDER)
+            if show_cal:
+                subprocess.run(_CAL_CMD)
 
         done_count = total - len(remaining)
         show_task(task)
@@ -538,7 +548,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
         # Letter hotkeys — suppress task-specific ones for pseudo-tasks
         hotkeys = []
         if has_cal and not is_pseudo:
-            hotkeys.append('c=calendar')
+            cal_label = 'c=hide-cal' if show_cal else 'c=calendar'
+            hotkeys.append(cal_label)
         if not is_pseudo:
             hotkeys += ['i=info', 'd=done']
         hotkeys.append('q=quit')
@@ -558,18 +569,13 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             remaining.pop(0)
 
         elif key in ('c', 'C') and has_cal and not is_pseudo:
-            subprocess.run(['task',
-                            'rc.calendar.details=none',
-                            'rc.calendar.legend=0',
-                            'rc.calendar.monthsperline=4',
-                            'rc.displayweeknumber=0',
-                            'calendar'])
-            _getch()
+            show_cal = not show_cal
+            # loop — re-renders with/without calendar
 
         elif key in ('i', 'I') and not is_pseudo:
             subprocess.run(['task', 'rc.journal.info=0', 'rc.hooks=off',
                             str(tid), 'info'])
-            _getch()
+            _getch()  # any key to dismiss, then re-render
 
         elif key.isdigit() and 1 <= int(key) <= len(computed):
             label, cmd, open_edit = computed[int(key) - 1]
