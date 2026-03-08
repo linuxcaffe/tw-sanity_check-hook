@@ -48,7 +48,7 @@ condition.until-before-due-sched.action      = edit|mod until:, expire 1 day aft
 condition.until-before-due-sched.helpers     = calendar
 
 condition.wait-after-due-sched.description = Wait date is after due or sched date (hidden until it's late)
-condition.wait-after-due-sched.filter      = +PENDING ( wait.after:due or wait.after:scheduled )
+condition.wait-after-due-sched.filter      = +PENDING wait.after:due or wait.after:scheduled
 condition.wait-after-due-sched.msg         = Task will appear in the list after it's already due
 condition.wait-after-due-sched.sort        = due+,scheduled+
 condition.wait-after-due-sched.action      = edit|mod wait:, wait:due-1d|mod wait:<due-1d>, wait:due-1w|mod wait:due-1w, clear wait:date|mod wait:

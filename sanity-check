@@ -31,7 +31,7 @@ except Exception:
 
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
 HOOKS_DIR   = Path.home() / '.task' / 'hooks'
-VERSION     = '0.5.0'
+VERSION     = '0.5.6'
 DIVIDER     = '─' * 62
 
 BOLD   = '\033[1m'
@@ -46,17 +46,44 @@ RESET  = '\033[0m'
 # Config
 # ============================================================================
 
-def load_rc(rc_file: Path) -> tuple:
-    """Parse rc file. Returns (global_config dict, conditions list)."""
+def load_rc(rc_file: Path, _visited: Optional[set] = None) -> tuple:
+    """Parse rc file, following include directives.
+
+    Any included .rc file may contribute condition.* and sanity.* keys.
+    sanity.rc definitions take precedence over included files.
+    Circular includes are ignored.
+
+    Returns (global_config dict, conditions list).
+    """
+    if _visited is None:
+        _visited = set()
+
+    rc_file = rc_file.expanduser().resolve()
+    if rc_file in _visited or not rc_file.exists():
+        return {}, []
+    _visited.add(rc_file)
+
     global_cfg = {}
     raw = {}
     order = []
-    if not rc_file.exists():
-        return global_cfg, []
+
     with rc_file.open() as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#') or '=' not in line:
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('include '):
+                inc_path = Path(line.split(None, 1)[1].strip()).expanduser()
+                sub_cfg, sub_conds = load_rc(inc_path, _visited)
+                for k, v in sub_cfg.items():
+                    global_cfg.setdefault(k, v)   # sanity.rc wins
+                for cond in sub_conds:
+                    name = cond['name']
+                    if name not in raw:             # first definition wins
+                        raw[name] = cond
+                        order.append(name)
+                continue
+            if '=' not in line:
                 continue
             k, _, v = line.partition('=')
             k = k.strip()
@@ -72,6 +99,7 @@ def load_rc(rc_file: Path) -> tuple:
                     raw[name] = {'name': name}
                     order.append(name)
                 raw[name][key] = v
+
     return global_cfg, [raw[n] for n in order]
 
 
@@ -287,6 +315,21 @@ def collect_tasks(cond: dict) -> list:
         tasks = collect_diag_broken()
     elif ctype == 'diag-dups':
         tasks = collect_diag_dups()
+    elif ctype == 'external':
+        collect_cmd = cond.get('collect', '')
+        if not collect_cmd:
+            tasks = []
+        else:
+            result = subprocess.run(collect_cmd, shell=True,
+                                    capture_output=True, text=True)
+            if result.returncode != 0 or not result.stdout.strip():
+                tasks = []
+            else:
+                try:
+                    data = json.loads(result.stdout)
+                    tasks = data if isinstance(data, list) else []
+                except json.JSONDecodeError:
+                    tasks = []
     else:
         tasks = task_export(cond.get('filter', ''))
     return sort_tasks(tasks, cond.get('sort', ''))
@@ -320,20 +363,45 @@ def age_str(tw_date: str) -> str:
     else:            return f'in {-delta}d'
 
 
-_OFFSET_RE = re.compile(r'<(\w+)([+-]\d+[dwmy])?>')
+_OFFSET_RE = re.compile(r'<([\w.]+?)([+-]\d+[dwmy])?>')
 
 
 def compute_action(template: str, task: dict) -> str:
-    """Interpolate <field> and <field±Nd/w/m/y> tokens with real task dates."""
+    """Interpolate <field>, <field±Nd/w/m/y>, and <field.age> tokens.
+
+    String fields (e.g. <description>) are substituted directly.
+    Date fields support ±offset: <due+1w>, <entry-1d>.
+    .age suffix returns a human-readable magnitude: <entry.age> → '3mo'.
+    """
     if not template:
         return ''
 
     def replace(m):
-        field  = m.group(1)
+        token  = m.group(1)
         offset = m.group(2) or ''
-        base   = date.today() if field == 'today' else tw_to_date(task.get(field, ''))
-        if not base:
-            return m.group(0)
+
+        # <field.age> — human-readable age of a date field
+        if token.endswith('.age'):
+            base = tw_to_date(task.get(token[:-4], ''))
+            if not base:
+                return m.group(0)
+            days = (date.today() - base).days
+            if days < 7:   return f'{days}d'
+            elif days < 30: return f'{days // 7}w'
+            elif days < 365: return f'{days // 30}mo'
+            else:           return f'{days // 365}y'
+
+        if token == 'today':
+            base = date.today()
+        else:
+            val = task.get(token, '')
+            if not val:
+                return m.group(0)
+            base = tw_to_date(val)
+            if base is None:
+                # Non-date string field — substitute directly, offset not applicable
+                return str(val) if not offset else m.group(0)
+
         if offset:
             sign = 1 if offset[0] == '+' else -1
             num  = int(offset[1:-1])
@@ -444,7 +512,7 @@ def prompt_prefill(prompt_text: str, prefill: str) -> Optional[str]:
 def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
               remaining: list) -> Optional[bool]:
     """Open readline edit prompt. Returns True=advanced, False=quit, None=loop."""
-    response = prompt_prefill('  Fix > ', prefill)
+    response = prompt_prefill('  > ', prefill)
     if response is None:
         return None  # Ctrl-C → loop
     response = response.strip()
@@ -459,12 +527,17 @@ def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
         remaining.pop(0)
         return True
     else:
-        result = subprocess.run(response.split())
+        parts = response.split()
+        if parts and parts[0] == 'task':
+            parts = ['task', 'rc.confirmation=off', 'rc.verbose=nothing'] + parts[1:]
+        result = subprocess.run(parts)
         if result.returncode == 0:
             remaining.pop(0)
+            if remaining:
+                _getch()
             return True
         else:
-            print('  [command failed — edit and retry, or s to skip]')
+            print('  [command failed — edit and retry, or Enter to skip]')
             return None
 
 
@@ -515,10 +588,12 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             remaining.pop(0)
             continue
 
+        task_msg = compute_action(msg, task)
+
         if clear_term == 'task':
             clear_screen()
             # Re-show condition context after clear
-            print(f'  {CYAN}{name}{RESET} — {msg}')
+            print(f'  {CYAN}{name}{RESET} — {task_msg}')
             print(DIVIDER)
             if show_cal:
                 subprocess.run(_CAL_CMD)
@@ -536,7 +611,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             computed = []
             for label, template, open_edit in actions:
                 cmd = compute_action(template, task)
-                computed.append((label, f'task {tid} {cmd}' if cmd else '', open_edit))
+                lbl = compute_action(label, task)
+                computed.append((lbl, f'task {tid} {cmd}' if cmd else '', open_edit))
 
         # Numbered fixes
         if computed:
@@ -555,7 +631,7 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             hotkeys += ['i=info', 'd=done']
         hotkeys.append('q=quit')
         print(f'\n  ({done_count + 1}/{total})  {CYAN}{"  ".join(hotkeys)}{RESET}  Enter=skip')
-
+        print('  > ', end='', flush=True)
         key = _getch()
 
         if key in ('\x03', '\x1b', 'q', 'Q'):
@@ -566,8 +642,10 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             remaining.pop(0)
 
         elif key in ('d', 'D') and not is_pseudo:
-            subprocess.run(['task', 'rc.confirmation=off', str(tid), 'done'])
+            subprocess.run(['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=affected', str(tid), 'done'])
             remaining.pop(0)
+            if remaining:
+                _getch()
 
         elif key in ('c', 'C') and has_cal and not is_pseudo:
             show_cal = not show_cal
@@ -585,11 +663,26 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
                 if r is False:
                     return False
             elif cmd:
-                result = subprocess.run(cmd.split())
-                if result.returncode == 0:
-                    remaining.pop(0)
+                if re.search(r'<\w', cmd):
+                    unresolved = re.findall(r'<[^>]+>', cmd)
+                    fields = ', '.join(u.strip('<>').split('-')[0].split('+')[0] for u in unresolved)
+                    print(f'  [skipped — task has no {fields} date]  (any key to continue)')
+                    _getch()
+                elif cmd.startswith('!'):
+                    subprocess.run(cmd[1:], shell=True)
+                    _getch()  # always stays in loop — any key to continue
                 else:
-                    print('  [command failed — press s to skip]')
+                    parts = cmd.split()
+                    if parts and parts[0] == 'task':
+                        parts = ['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=affected'] + parts[1:]
+                    result = subprocess.run(parts)
+                    if result.returncode == 0:
+                        remaining.pop(0)
+                        if remaining:
+                            _getch()
+                    else:
+                        print('  [command failed — press any key to skip]')
+                        _getch()
             else:
                 print('  [no command for this task]')
 
@@ -610,94 +703,100 @@ def _rjust_line(left: str, right: str) -> str:
 
 
 def cmd_menu(conditions: list, clear_term: str = 'no'):
-    today = date.today().strftime('%Y-%m-%d')
-    diag  = _parse_diag_header()
-    stats = _run_stats()
+    while True:
+        today = date.today().strftime('%Y-%m-%d')
+        diag  = _parse_diag_header()
+        stats = _run_stats()
 
-    print(f'\nTaskwarrior Sanity check — {today}')
-    print(DIVIDER)
+        print(f'\nTaskwarrior Sanity check — {today}')
+        print(DIVIDER)
 
-    ver_plat = diag['version']
-    if diag['platform']:
-        ver_plat += f' - Platform: {diag["platform"]}'
-    if ver_plat:
-        print(ver_plat)
-    if diag['file']:
-        print(f'File:{diag["file"]}')
-    if diag['data']:
-        print(_rjust_line(f'Data:{diag["data"]}', 'see: task diag'))
+        ver_plat = diag['version']
+        if diag['platform']:
+            ver_plat += f' - Platform: {diag["platform"]}'
+        if ver_plat:
+            print(ver_plat)
+        if diag['file']:
+            print(f'File:{diag["file"]}')
+        if diag['data']:
+            print(_rjust_line(f'Data:{diag["data"]}', 'see: task diag'))
 
-    print(DIVIDER)
+        print(DIVIDER)
 
-    stat_keys = ['Pending', 'Waiting', 'Recurring', 'Completed', 'Deleted', 'Total']
-    W = 20
-    for key in stat_keys:
-        val = stats.get(key, '')
-        if not val:
-            continue
-        left = f'{key:<{W}}{val:>6}'
-        if key == 'Total':
-            print(_rjust_line(left, 'see: task stats'))
-        else:
-            print(left)
-
-    print(DIVIDER)
-
-    agenda = [(cond, collect_tasks(cond)) for cond in conditions]
-    total  = sum(len(tasks) for _, tasks in agenda)
-    width  = max(len(c['name']) for c in conditions) if conditions else 10
-
-    for i, (cond, tasks) in enumerate(agenda, 1):
-        n    = len(tasks)
-        flag = '▶ ' if n else '  '
-        desc = cond.get('description', '')
-        row  = f'  {flag}{i:>2}. {cond["name"]:<{width}}  {n:>3}   {desc}'
-        print(f'{DIM}{row}{RESET}' if n == 0 else row)
-
-    print(DIVIDER)
-    if total == 0:
-        print('  All clear.\n')
-        return
-
-    print(f'  {total} issue{"s" if total != 1 else ""}')
-
-    use_getch = len(agenda) < 10
-    if use_getch:
-        print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
-        key = _getch()
-    else:
-        print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
-        try:
-            key = input('  > ').strip() or '\r'
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return
-
-    if not key or key in ('\x03', '\x1b', 'q', 'Q', '\r', '\n'):
-        return
-    elif key.lower() == 'a':
-        selected = agenda
-    else:
-        try:
-            n = int(key)
-            if 1 <= n <= len(agenda):
-                selected = [agenda[n - 1]]
+        stat_keys = ['Pending', 'Waiting', 'Recurring', 'Completed', 'Deleted', 'Total']
+        W = 20
+        for key in stat_keys:
+            val = stats.get(key, '')
+            if not val:
+                continue
+            left = f'{key:<{W}}{val:>6}'
+            if key == 'Total':
+                print(_rjust_line(left, 'see: task stats'))
             else:
-                print(f'  Out of range: {n}')
-                return
-        except ValueError:
-            print(f'  Unknown: {key!r}')
+                print(left)
+
+        print(DIVIDER)
+
+        agenda = [(cond, collect_tasks(cond)) for cond in conditions]
+        total  = sum(len(tasks) for _, tasks in agenda)
+        width  = max(len(c['name']) for c in conditions) if conditions else 10
+
+        for i, (cond, tasks) in enumerate(agenda, 1):
+            n    = len(tasks)
+            flag = '▶ ' if n else '  '
+            desc = cond.get('description', '')
+            row  = f'  {flag}{i:>2}. {cond["name"]:<{width}}  {n:>3}   {desc}'
+            print(f'{DIM}{row}{RESET}' if n == 0 else row)
+
+        print(DIVIDER)
+        if total == 0:
+            print('  All clear.\n')
             return
 
-    print()
-    for cond, tasks in selected:
-        if not tasks:
-            continue
-        if not review_condition(cond, tasks, clear_term):
-            print('\n[sanity-check] Session ended.')
-            break
+        print(f'  {total} issue{"s" if total != 1 else ""}')
 
-    print()
+        use_getch = len(agenda) < 10
+        if use_getch:
+            print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
+            key = _getch()
+        else:
+            print(f'\n  Select [1-{len(agenda)}]  a=all  q=quit  Enter=quit')
+            try:
+                key = input('  > ').strip() or '\r'
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+
+        if not key or key in ('\x03', '\x1b', 'q', 'Q', '\r', '\n'):
+            return
+        elif key.lower() == 'a':
+            selected = agenda
+        else:
+            try:
+                n = int(key)
+                if 1 <= n <= len(agenda):
+                    selected = [agenda[n - 1]]
+                else:
+                    print(f'  Out of range: {n}')
+                    continue
+            except ValueError:
+                print(f'  Unknown: {key!r}')
+                continue
+
+        print()
+        quit_session = False
+        for cond, tasks in selected:
+            if not tasks:
+                print(f'  No matches found: {cond.get("description", cond["name"])}')
+                continue
+            if not review_condition(cond, tasks, clear_term):
+                print('\n[sanity-check] Session ended.')
+                quit_session = True
+                break
+
+        if quit_session:
+            return
+        print()
 
 
 # ============================================================================
