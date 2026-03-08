@@ -31,7 +31,7 @@ except Exception:
 
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'sanity.rc'
 HOOKS_DIR   = Path.home() / '.task' / 'hooks'
-VERSION     = '0.5.6'
+VERSION     = '0.5.7'
 DIVIDER     = '─' * 62
 
 BOLD   = '\033[1m'
@@ -510,7 +510,7 @@ def prompt_prefill(prompt_text: str, prefill: str) -> Optional[str]:
 # ============================================================================
 
 def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
-              remaining: list) -> Optional[bool]:
+              remaining: list, session_action: Optional[list] = None) -> Optional[bool]:
     """Open readline edit prompt. Returns True=advanced, False=quit, None=loop."""
     response = prompt_prefill('  > ', prefill)
     if response is None:
@@ -532,6 +532,8 @@ def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
             parts = ['task', 'rc.confirmation=off', 'rc.verbose=nothing'] + parts[1:]
         result = subprocess.run(parts)
         if result.returncode == 0:
+            if session_action is not None:
+                session_action[0] = True
             remaining.pop(0)
             if remaining:
                 _getch()
@@ -541,8 +543,15 @@ def _run_edit(prefill: str, tid, skip_uuids: set, uuid: str,
             return None
 
 
-def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
-    """Interactive review of one condition. Returns False to quit session."""
+def review_condition(cond: dict, tasks: list, clear_term: str = 'no',
+                     session_action: Optional[list] = None) -> bool:
+    """Interactive review of one condition. Returns False to quit session.
+
+    session_action is a [bool] mutable flag shared across conditions — set True
+    on any successful action to enable u=undo for the rest of the session.
+    """
+    if session_action is None:
+        session_action = [False]
     name    = cond['name']
     msg     = cond.get('msg', name)
     total   = len(tasks)
@@ -629,6 +638,8 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
             hotkeys.append(cal_label)
         if not is_pseudo:
             hotkeys += ['i=info', 'd=done']
+        if session_action[0]:
+            hotkeys.append('u=undo')
         hotkeys.append('q=quit')
         print(f'\n  ({done_count + 1}/{total})  {CYAN}{"  ".join(hotkeys)}{RESET}  Enter=skip')
         print('  > ', end='', flush=True)
@@ -643,9 +654,14 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
 
         elif key in ('d', 'D') and not is_pseudo:
             subprocess.run(['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=affected', str(tid), 'done'])
+            session_action[0] = True
             remaining.pop(0)
             if remaining:
                 _getch()
+
+        elif key in ('u', 'U') and session_action[0]:
+            subprocess.run(['task', 'rc.hooks=off', 'undo'])
+            _getch()
 
         elif key in ('c', 'C') and has_cal and not is_pseudo:
             show_cal = not show_cal
@@ -659,7 +675,7 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
         elif key.isdigit() and 1 <= int(key) <= len(computed):
             label, cmd, open_edit = computed[int(key) - 1]
             if open_edit:
-                r = _run_edit(cmd or f'task {tid} ', tid, skip_uuids, uuid, remaining)
+                r = _run_edit(cmd or f'task {tid} ', tid, skip_uuids, uuid, remaining, session_action)
                 if r is False:
                     return False
             elif cmd:
@@ -677,6 +693,7 @@ def review_condition(cond: dict, tasks: list, clear_term: str = 'no') -> bool:
                         parts = ['task', 'rc.hooks=off', 'rc.confirmation=off', 'rc.verbose=affected'] + parts[1:]
                     result = subprocess.run(parts)
                     if result.returncode == 0:
+                        session_action[0] = True
                         remaining.pop(0)
                         if remaining:
                             _getch()
@@ -703,6 +720,7 @@ def _rjust_line(left: str, right: str) -> str:
 
 
 def cmd_menu(conditions: list, clear_term: str = 'no'):
+    session_action = [False]  # shared across all conditions this session
     while True:
         today = date.today().strftime('%Y-%m-%d')
         diag  = _parse_diag_header()
@@ -789,7 +807,7 @@ def cmd_menu(conditions: list, clear_term: str = 'no'):
             if not tasks:
                 print(f'  No matches found: {cond.get("description", cond["name"])}')
                 continue
-            if not review_condition(cond, tasks, clear_term):
+            if not review_condition(cond, tasks, clear_term, session_action):
                 print('\n[sanity-check] Session ended.')
                 quit_session = True
                 break
@@ -842,10 +860,11 @@ def main() -> int:
             print(f'  ▶ {cond["name"]:<24} {len(tasks):>3} task{"s" if len(tasks) != 1 else ""}')
     print()
 
+    session_action = [False]
     for cond, tasks in agenda:
         if not tasks:
             continue
-        if not review_condition(cond, tasks, clear_term):
+        if not review_condition(cond, tasks, clear_term, session_action):
             print('\n[sanity-check] Session ended.')
             break
 
