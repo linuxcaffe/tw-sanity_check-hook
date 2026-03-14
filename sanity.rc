@@ -5,7 +5,7 @@
 #   include ~/.task/config/sanity.rc
 #
 # Global settings:
-#   sanity.clear-term = task | condition | no
+#   sanity.clear-term = task | condition | type | no
 #
 # Each condition has:
 #   description   short label shown in status/menu
@@ -79,3 +79,39 @@ condition.diag-broken.type        = diag-broken
 condition.diag-dups.description = Tasks with duplicate UUIDs
 condition.diag-dups.msg         = Duplicate UUIDs — manual investigation needed
 condition.diag-dups.type        = diag-dups
+
+# ─────────────────────────────────────────────────────────────────────────────
+# type=args conditions — invoked by CLI arg pattern: sanity-check project:X
+#
+# attrib= names the argument prefix to match:
+#   project:work   → attrib=project, <arg>=work
+#   priority:H     → attrib=priority, <arg>=H
+#   +urgent        → attrib=+, <arg>=urgent
+#
+# <arg> is substituted in filter, msg, and action at runtime.
+# First-in-wins when multiple attrib-matching args are given.
+# ─────────────────────────────────────────────────────────────────────────────
+
+condition.args-project.attrib      = project
+condition.args-project.description = Pending tasks in project:<arg>
+condition.args-project.filter      = +PENDING project:<arg>
+condition.args-project.msg         = project:<arg> — review and triage
+condition.args-project.sort        = urgency-
+condition.args-project.action      = list <args> project tasks|!task list project:<args>, edit|mod project:, edit due|mod due:, done|, del|rc.confirmation=off del
+condition.args-project.type        = args
+
+condition.args-priority.attrib     = priority
+condition.args-priority.description = Pending tasks with priority:<arg>
+condition.args-priority.filter     = +PENDING priority:<arg>
+condition.args-priority.msg        = priority:<arg> tasks — review and triage
+condition.args-priority.sort       = urgency-
+condition.args-priority.action     = edit|mod priority:, edit due|mod due:, done|, lower priority|mod priority:M
+condition.args-priority.type       = args
+
+condition.args-tag.attrib          = +
+condition.args-tag.description     = Pending tasks tagged +<arg>
+condition.args-tag.filter          = +PENDING +<arg>
+condition.args-tag.msg             = +<arg> tasks — review and triage
+condition.args-tag.sort            = urgency-
+condition.args-tag.action          = edit|mod , edit due|mod due:, done|, remove tag|mod -<arg>
+condition.args-tag.type            = args

@@ -7,7 +7,7 @@ set -euo pipefail
 # Version: 0.5.7
 # ============================================================================
 
-VERSION="0.5.7"
+VERSION="0.5.8"
 APPNAME="sanity-check"
 BASE_URL="https://raw.githubusercontent.com/linuxcaffe/tw-sanity-check/master"
 
